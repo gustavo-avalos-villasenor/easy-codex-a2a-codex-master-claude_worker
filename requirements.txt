@@ -1,0 +1,2 @@
+# The bridge and client use Python's standard library.
+# Claude Code and Codex CLI are installed separately on the host.
