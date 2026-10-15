@@ -34,6 +34,8 @@ Options:
   --context-id ID          Stable A2A context ID.
   --state-dir DIRECTORY    SQLite, session, and log directory.
   --repository-url URL     Repository URL shared with the master.
+  --attached-session UUID  Answer tasks from that Claude Code conversation.
+                           mount-worker.sh prints the full command.
   --attached               Answer tasks from the Claude Code conversation that
                            runs this launcher (see CLAUDE.md).
   --headless               Answer tasks with a separate claude --print session.
@@ -85,6 +87,12 @@ while [ "$#" -gt 0 ]; do
             REPOSITORY_URL="$2"
             shift 2
             ;;
+        --attached-session)
+            [ "$#" -ge 2 ] || { usage; exit 2; }
+            EXECUTOR=attached
+            export A2A_ATTACHED_SESSION="$2"
+            shift 2
+            ;;
         --attached)
             EXECUTOR=attached
             shift
@@ -120,6 +128,11 @@ if [ "${#positional[@]}" -gt 2 ]; then
 fi
 
 STATE_DIR="${STATE_DIR:-$ROOT/state}"
+if [ -z "$REPOSITORY_URL" ] && command -v git >/dev/null 2>&1; then
+    # Drop any credentials embedded in the remote URL before sharing it.
+    REPOSITORY_URL="$(git -C "$ROOT" remote get-url origin 2>/dev/null |
+        sed -E 's#^(https?://)[^/@]+@#\1#' || true)"
+fi
 PID_FILE="${PID_FILE:-$STATE_DIR/claude-worker.pid}"
 LOG_FILE="${LOG_FILE:-$STATE_DIR/claude-worker.log}"
 BASE_URL="${BASE_URL:-http://$HOST:$PORT}"

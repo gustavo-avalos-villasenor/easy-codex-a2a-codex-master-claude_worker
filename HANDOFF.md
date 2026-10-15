@@ -20,10 +20,11 @@ SQLite. Only one task runs Claude at a time. The Claude session is created by
 the first message and its UUID is stored in `state/claude-session.json`; later
 messages use `claude --resume` with that UUID.
 
-With the `attached` executor (the default when the launcher runs inside
-Claude Code) the bridge does not start Claude. It stores each task in the
-`attached_requests` table, and the launching conversation answers it with
-`a2a_inbox.py wait` and `a2a_inbox.py reply`, as described in `CLAUDE.md`.
+With the `attached` executor the bridge does not start Claude. It stores
+each task in the `attached_requests` table, and the Claude Code conversation
+named by `--attached-session` answers it with `a2a_inbox.py wait` and
+`a2a_inbox.py reply`. That conversation runs `mount-worker.sh`, which prints
+the listener command for the user, as described in `CLAUDE.md`.
 The session description above applies to the `headless` executor.
 
 Communication is request and response based. Claude does not open new

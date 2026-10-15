@@ -93,30 +93,76 @@ def build_connection_pack(
 
 
 def remote_agent_message(pack: dict[str, Any]) -> str:
+    """Self-contained instructions: the master needs nothing else."""
+
     repository = pack["repositoryUrl"]
-    repository_line = ""
-    if not repository.startswith("("):
-        repository_line = f"Worker repository: {repository}\n"
     base_url = pack["baseUrl"]
     context_id = pack["contextId"]
+    if repository.startswith("("):
+        get_client = (
+            "1. The worker did not publish its repository URL, so you cannot "
+            "fetch a2a_client.py. Use the raw JSON-RPC calls in step 4.\n"
+        )
+    else:
+        folder = repository.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "a2a-worker"
+        get_client = (
+            "1. Get the client. It needs Python 3.10+ and only the standard "
+            "library (no pip install):\n"
+            f"   git clone {repository} {folder} || git -C {folder} pull\n"
+            f"   cd {folder}\n"
+        )
+    attached = pack.get("executor") == "attached"
+    who = (
+        "a live Claude Code conversation that a person is watching"
+        if attached
+        else "a persistent headless Claude Code session"
+    )
+    send_message = (
+        '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":'
+        f'{{"role":"ROLE_USER","contextId":"{context_id}","parts":[{{"text":"YOUR MESSAGE"}}]}},'
+        '"configuration":{"returnImmediately":true}}}'
+    )
+    get_task = (
+        '{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"TASK-ID"}}'
+    )
     return (
-        "You are the Codex master and must communicate with a remote Claude "
-        "Code worker through A2A 1.0 over HTTP.\n"
-        f"{repository_line}"
-        f"Read the Agent Card first: {pack['agentCardUrl']}\n"
-        f"Use exactly this JSON-RPC endpoint: {pack['jsonRpcUrl']}\n"
-        f"Use exactly this contextId: {context_id}\n\n"
-        "The worker keeps one persistent Claude session and processes one "
-        "request at a time. Do not assume that it is on localhost.\n\n"
-        "For a short request, use an SSE connection until the response arrives:\n"
-        f'python3 a2a_client.py "Your message for Claude" "{base_url}"\n\n'
-        "For a long task, return control to the master and keep the task ID:\n"
-        f'python3 a2a_client.py --submit "Your message for Claude" "{base_url}"\n'
-        f'python3 a2a_client.py --wait "TASK-ID" "{base_url}"\n\n'
-        "If this master is a Codex CLI conversation and you have its UUID, use "
-        "--submit-and-resume. Do not run --wait or resend the same message "
-        "after using that mode. If a connection drops, keep the task ID and "
-        "reconnect with --wait; do not resubmit automatically."
+        "You are the Codex master. A Claude Code worker is waiting for your "
+        "requests over A2A 1.0 (JSON-RPC over HTTP). Everything you need is "
+        "below; do not ask for further setup.\n\n"
+        f"Agent Card:        {pack['agentCardUrl']}\n"
+        f"JSON-RPC endpoint: {pack['jsonRpcUrl']}\n"
+        f"contextId:         {context_id} (fixed; do not invent another one)\n\n"
+        f"{get_client}"
+        "2. Check that the worker is reachable:\n"
+        f'   curl -fsS "{pack["agentCardUrl"]}"\n'
+        "3. Send requests with a2a_client.py from that folder. It reads the "
+        "endpoint and contextId from the Agent Card; do not build JSON-RPC by "
+        "hand while the client is available.\n"
+        "   Short request (waits for the answer):\n"
+        f'     python3 a2a_client.py "Your message for Claude" "{base_url}"\n'
+        "   Long task (returns a taskId at once; collect the answer later):\n"
+        f'     python3 a2a_client.py --submit "Your message for Claude" "{base_url}"\n'
+        f'     python3 a2a_client.py --wait "TASK-ID" "{base_url}"\n'
+        "   If you are a Codex CLI conversation and know your own conversation "
+        "UUID, --submit-and-resume submits the task and resumes your "
+        "conversation once with the answer:\n"
+        f'     python3 a2a_client.py --submit-and-resume "Your message" "{base_url}" "YOUR-CODEX-CONVERSATION-UUID"\n'
+        "     After --submit-and-resume, do not run --wait or resubmit.\n"
+        "4. Only without the client, use raw JSON-RPC:\n"
+        f"   curl -fsS -H 'Content-Type: application/json' -d '{send_message}' {pack['jsonRpcUrl']}\n"
+        "   Take result.task.id from the reply and repeat until "
+        "result.task.status.state is TASK_STATE_COMPLETED or TASK_STATE_FAILED; "
+        "the answer is in result.task.status.message.parts[0].text:\n"
+        f"   curl -fsS -H 'Content-Type: application/json' -d '{get_task}' {pack['jsonRpcUrl']}\n\n"
+        "Rules:\n"
+        f"- The worker is {who}. It keeps context between your messages, "
+        "handles one task at a time, and may take minutes to answer.\n"
+        "- Use the URLs above exactly. Do not assume that it is on localhost.\n"
+        "- If a connection drops, keep the taskId and reconnect with --wait "
+        "(or GetTask). Never resend the same request: the worker may already "
+        "be doing it.\n"
+        "- A task can end in TASK_STATE_FAILED with a reason, for example when "
+        "the worker declines it. Read the reason before sending a new request."
     )
 
 
@@ -156,9 +202,8 @@ def format_connection_pack(pack: dict[str, Any]) -> str:
         "The worker is now in standby, waiting for requests.",
         *(
             [
-                "Attached executor: the launching Claude Code conversation answers",
-                "each task. It must keep `python a2a_inbox.py wait` running and",
-                "reply with `python a2a_inbox.py reply TASK-ID --file ANSWER`.",
+                f"Attached executor: Claude Code session {pack['sessionId']} answers",
+                "each task. That conversation must keep `a2a_inbox.py wait` running.",
             ]
             if pack.get("executor") == "attached"
             else []

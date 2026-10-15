@@ -39,24 +39,32 @@ EXECUTORS = ("auto", "attached", "headless")
 ATTACHED_POLL_SECONDS = 0.5
 
 
-def resolve_executor(requested: str) -> tuple[str, str | None]:
-    """Choose who answers tasks: the launching conversation or a new session.
+def resolve_executor(
+    requested: str,
+    attached_session: str | None = None,
+) -> tuple[str, str | None]:
+    """Choose who answers tasks: a Claude Code conversation or a new session.
 
-    ``attached`` mounts the worker on the Claude Code conversation that started
-    the bridge, identified by ``CLAUDE_CODE_SESSION_ID``. That conversation
+    ``attached`` mounts the worker on an existing Claude Code conversation: the
+    one named by ``attached_session`` (``mount-worker.sh`` prints it), or the
+    one running the bridge (``CLAUDE_CODE_SESSION_ID``). That conversation
     reads tasks and posts answers with ``a2a_inbox.py``. ``headless`` runs a
-    separate ``claude --print`` session. ``auto`` selects ``attached`` when the
-    bridge is launched from inside Claude Code and ``headless`` otherwise.
+    separate ``claude --print`` session. ``auto`` selects ``attached`` when a
+    conversation is known and ``headless`` otherwise.
     """
 
-    session_id = normalized_session_id(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    session_id = normalized_session_id(attached_session) or normalized_session_id(
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+    )
+    if attached_session and not normalized_session_id(attached_session):
+        raise RuntimeError(f"Invalid attached session UUID: {attached_session}")
     if requested == "auto":
         requested = "attached" if session_id else "headless"
     if requested == "attached" and not session_id:
         raise RuntimeError(
-            "Attached mode needs CLAUDE_CODE_SESSION_ID. Start the worker from "
-            "the Claude Code conversation that will answer the tasks, or use "
-            "--executor headless."
+            "Attached mode needs the Claude Code session that answers the tasks. "
+            "Ask that conversation to run ./mount-worker.sh and use the command "
+            "it prints, or use --executor headless."
         )
     return requested, session_id if requested == "attached" else None
 
@@ -848,6 +856,11 @@ def main() -> None:
         "headless: run a separate claude --print session; auto: attached when "
         "launched from Claude Code.",
     )
+    parser.add_argument(
+        "--attached-session",
+        default=os.environ.get("A2A_ATTACHED_SESSION") or None,
+        help="UUID of the Claude Code conversation that answers tasks.",
+    )
     parser.add_argument("--demo", action="store_true")
     args = parser.parse_args()
 
@@ -875,11 +888,19 @@ def main() -> None:
     executor = "demo"
     attached_session_id = None
     if not args.demo:
-        executor, attached_session_id = resolve_executor(args.executor)
+        executor, attached_session_id = resolve_executor(
+            args.executor, args.attached_session
+        )
 
     worker = None
     cli = ["(not used)"]
     if executor == "attached":
+        state_dir.mkdir(parents=True, exist_ok=True)
+        # a2a_inbox.py checks this so only the mounted conversation takes tasks.
+        (state_dir / "attached-session.json").write_text(
+            json.dumps({"sessionId": attached_session_id}) + "\n",
+            encoding="utf-8",
+        )
         print("Executor:            attached", flush=True)
         print(f"Claude session:      {attached_session_id} (launching conversation)", flush=True)
     elif not args.demo:

@@ -30,6 +30,24 @@ def default_task_db() -> Path:
     return state_dir.expanduser() / "tasks.sqlite3"
 
 
+def check_session(path: Path, force: bool) -> None:
+    """Refuse to serve a bridge mounted on a different conversation."""
+
+    current = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    try:
+        mounted = json.loads(
+            (path.parent / "attached-session.json").read_text(encoding="utf-8")
+        ).get("sessionId")
+    except (OSError, ValueError, AttributeError):
+        return
+    if force or not current or not mounted or current == mounted:
+        return
+    raise SystemExit(
+        f"This worker is mounted on Claude Code session {mounted}, not on this "
+        f"conversation ({current}). Use --force to take its tasks anyway."
+    )
+
+
 def connect(path: Path) -> sqlite3.Connection:
     if not path.is_file():
         raise SystemExit(f"Task database not found: {path}. Is the worker running?")
@@ -52,8 +70,11 @@ def pending(connection: sqlite3.Connection) -> sqlite3.Row | None:
 def wait(path: Path, timeout: float, poll: float) -> int:
     deadline = None if timeout <= 0 else time.monotonic() + timeout
     while True:
-        with connect(path) as connection:
-            row = pending(connection)
+        row = None
+        # The waiter may start before the user runs the listener.
+        if path.is_file():
+            with connect(path) as connection:
+                row = pending(connection)
         if row is not None:
             print(
                 json.dumps(
@@ -101,6 +122,10 @@ def main() -> None:
     wait_parser = commands.add_parser("wait", help="Block until a task is pending.")
     wait_parser.add_argument("--timeout", type=float, default=0, help="Seconds; 0 waits forever.")
     wait_parser.add_argument("--poll", type=float, default=1.0)
+    wait_parser.add_argument(
+        "--force", action="store_true",
+        help="Serve the worker even if it is mounted on another conversation.",
+    )
 
     reply_parser = commands.add_parser("reply", help="Answer a pending task.")
     reply_parser.add_argument("task_id")
@@ -111,6 +136,7 @@ def main() -> None:
     args = parser.parse_args()
     path = (args.task_db or default_task_db()).expanduser().resolve()
     if args.command == "wait":
+        check_session(path, args.force)
         raise SystemExit(wait(path, args.timeout, args.poll))
     if args.file:
         text = args.file.read_text(encoding="utf-8")
