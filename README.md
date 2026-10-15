@@ -229,6 +229,7 @@ do not expose it directly to the public Internet.
 | --- | --- | --- |
 | The master's task stays in `TASK_STATE_WORKING` with "Queued", then fails with "is not listening" | The worker conversation's waiter is not running (the conversation was closed, restarted, or resumed) | In the worker conversation: `a2a_inbox.py status`, answer any pending task, start `a2a_inbox.py wait` again. Then resend from the master. |
 | The Agent Card says `"attachedWorker": "not listening"` | Same as above | Same as above |
+| `a2a_inbox.py wait` says the worker "is mounted on Claude Code session X, not on this conversation" | The conversation was resumed under a new session ID | Run `./mount-worker.sh` again and restart the listener with the new command it prints |
 | `a2a_inbox.py status` says the task database is missing | The listener is not running | Start it again with the command from `mount-worker.sh` |
 | The listener's output scrolled away | Long output in a terminal without scrollback | Open `state/connection-pack.txt`, or run `.venv/bin/python connection_pack.py` |
 | The listener cannot write `state/` | It runs as a different OS user than the owner of the repository | Run it as the owner, or `chown -R` the repository to that user |

@@ -89,7 +89,10 @@ def check_session(path: Path, force: bool) -> None:
         return
     raise SystemExit(
         f"This worker is mounted on Claude Code session {mounted}, not on this "
-        f"conversation ({current}). Use --force to take its tasks anyway."
+        f"conversation ({current}). If this is the same conversation, resumed "
+        "under a new session ID, run ./mount-worker.sh again and ask the user "
+        "to restart the listener with the command it prints. Use --force to "
+        "take its tasks anyway."
     )
 
 

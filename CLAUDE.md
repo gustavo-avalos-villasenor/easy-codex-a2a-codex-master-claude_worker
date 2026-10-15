@@ -21,7 +21,9 @@ The waiter is a background command of this conversation, so **it dies whenever
 this conversation is closed, restarted, or resumed** (`claude --resume`,
 `claude -c`). When that happens Claude Code tells you that a background
 command was "stopped" or "didn't finish before the previous session ended".
-Nothing else restarts it: you must.
+Nothing else restarts it: you must. A resumed conversation may also get a new
+session ID, and the listener only serves the ID it was started with (see
+"Recover", step 5).
 
 While no waiter is running, the listener still accepts tasks. Each one fails
 after the claim timeout (120 seconds by default, `A2A_ATTACHED_CLAIM_TIMEOUT`)
@@ -100,6 +102,11 @@ sees no answer):
 4. If the status says the task database is missing, the listener is not
    running: ask the user to start it again with the command from
    `mount-worker.sh`.
+5. If `wait` refuses because the worker "is mounted on Claude Code session
+   X, not on this conversation", this conversation was resumed under a new
+   session ID. Run `./mount-worker.sh` again and ask the user to stop the
+   listener (`Ctrl+C`) and start it with the new command it prints. Then
+   start the waiter.
 
 ## Stop
 
