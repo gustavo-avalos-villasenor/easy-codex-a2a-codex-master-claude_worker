@@ -40,6 +40,7 @@ def build_connection_pack(
     log_file: Path | str | None = None,
     session_id: str | None = None,
     mode: str = "standby",
+    executor: str = "headless",
     claude_cli: str | None = None,
     model: str | None = None,
     permission_mode: str | None = None,
@@ -83,6 +84,7 @@ def build_connection_pack(
         "logFile": str(Path(log_file).expanduser()) if log_file else "(not specified)",
         "stopCommand": stop_command,
         "mode": mode,
+        "executor": executor,
         "claudeCli": claude_cli or "claude (PATH/configured)",
         "model": model or "Claude defaults",
         "permissionMode": permission_mode or "acceptEdits",
@@ -133,6 +135,7 @@ def format_connection_pack(pack: dict[str, Any]) -> str:
         f"Listen host:     {pack['listenHost']}",
         f"TCP port:        {pack['port']}",
         f"Mode:            {pack['mode']}",
+        f"Executor:        {pack['executor']}",
         f"Working dir:     {pack['workingDirectory']}",
         f"State dir:       {pack['stateDirectory']}",
         f"Session file:    {pack['sessionFile']}",
@@ -151,6 +154,15 @@ def format_connection_pack(pack: dict[str, Any]) -> str:
         f'curl -fsS "{pack["agentCardUrl"]}"',
         "",
         "The worker is now in standby, waiting for requests.",
+        *(
+            [
+                "Attached executor: the launching Claude Code conversation answers",
+                "each task. It must keep `python a2a_inbox.py wait` running and",
+                "reply with `python a2a_inbox.py reply TASK-ID --file ANSWER`.",
+            ]
+            if pack.get("executor") == "attached"
+            else []
+        ),
         "In standby mode, press Ctrl+C in this terminal to stop it.",
         f"In background mode, use {pack['stopCommand']} to stop it.",
         "",
@@ -179,6 +191,7 @@ def _from_environment() -> dict[str, Any]:
         pid_file=Path(os.environ.get("A2A_PID_FILE") or state_dir / "claude-worker.pid"),
         log_file=Path(os.environ.get("A2A_LOG_FILE") or state_dir / "claude-worker.log"),
         mode=os.environ.get("A2A_WORKER_MODE", "standby"),
+        executor=os.environ.get("A2A_EXECUTOR", "headless"),
         claude_cli=os.environ.get("A2A_CLAUDE_CLI"),
         model=os.environ.get("A2A_CLAUDE_MODEL"),
         permission_mode=os.environ.get("A2A_CLAUDE_PERMISSION_MODE", "acceptEdits"),

@@ -17,6 +17,8 @@ fi
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8766}"
 CONTEXT_ID="${CONTEXT_ID:-claude-worker}"
+EXECUTOR="$(printenv A2A_EXECUTOR 2>/dev/null || true)"
+EXECUTOR="${EXECUTOR:-auto}"
 FOREGROUND=1
 
 usage() {
@@ -32,6 +34,11 @@ Options:
   --context-id ID          Stable A2A context ID.
   --state-dir DIRECTORY    SQLite, session, and log directory.
   --repository-url URL     Repository URL shared with the master.
+  --attached               Answer tasks from the Claude Code conversation that
+                           runs this launcher (see CLAUDE.md).
+  --headless               Answer tasks with a separate claude --print session.
+                           Without either flag, attached is used when launched
+                           from Claude Code and headless otherwise.
 
 The port and context ID are also accepted as positional arguments.
 EOF
@@ -77,6 +84,14 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { usage; exit 2; }
             REPOSITORY_URL="$2"
             shift 2
+            ;;
+        --attached)
+            EXECUTOR=attached
+            shift
+            ;;
+        --headless)
+            EXECUTOR=headless
+            shift
             ;;
         --help|-h)
             usage >&1
@@ -142,6 +157,7 @@ export A2A_BASE_URL="$BASE_URL"
 export A2A_CONTEXT_ID="$CONTEXT_ID"
 export A2A_REPOSITORY_URL="$REPOSITORY_URL"
 export A2A_CLAUDE_CWD="$ROOT"
+export A2A_EXECUTOR="$EXECUTOR"
 if [ "$FOREGROUND" -eq 1 ]; then
     export A2A_WORKER_MODE=standby
 else

@@ -1,15 +1,29 @@
 # Codex master + Claude worker
 
+> **Agent setting up the worker:** read [CLAUDE.md](CLAUDE.md) first. By
+> default the worker is mounted on the Claude Code conversation that launches
+> it (`attached` executor): that conversation receives each task from the
+> master, answers it, and the user sees the exchange there.
+
 This repository exposes a persistent Claude Code session as an A2A 1.0
 worker. Codex acts as the master: it sends messages to the bridge over HTTP
 and receives the worker's responses. The master may run on another machine;
 the remote master must use the URL advertised by `A2A_BASE_URL`. The local
 value `127.0.0.1` is only the default for a same-machine test.
 
+Two executors answer the tasks:
+
+- `attached` (default when the launcher runs inside Claude Code): the bridge
+  queues each task and the launching conversation answers it with
+  `a2a_inbox.py wait` / `a2a_inbox.py reply`. See [CLAUDE.md](CLAUDE.md).
+- `headless` (default from a plain terminal, or with `--headless`): the bridge
+  runs a separate persistent Claude Code session with `claude --print`.
+
 The bridge keeps two durable pieces of state:
 
 - `state/tasks.sqlite3`: A2A tasks and their states.
-- `state/claude-session.json`: the persistent Claude Code session UUID.
+- `state/claude-session.json`: the persistent Claude Code session UUID
+  (headless executor only).
 
 Each message is processed sequentially within the same Claude session. After
 the first message, later messages use Claude's `--resume` option, so the
@@ -147,6 +161,7 @@ The most useful variables are:
 - `A2A_STATE_DIR`: directory for SQLite, session, PID, and logs.
 - `A2A_REPOSITORY_URL`: repository URL included in the connection pack.
 - `A2A_WORKER_MODE`: mode label shown in the connection pack.
+- `A2A_EXECUTOR`: `auto` (default), `attached`, or `headless`.
 
 Example:
 
@@ -167,6 +182,7 @@ do not expose it directly to the public Internet.
 
 - `a2a_bridge_claude.py`: A2A bridge and persistent Claude worker.
 - `a2a_client.py`: standard client for the Codex master.
+- `a2a_inbox.py`: wait for and answer tasks in attached mode.
 - `connection_pack.py`: prints the complete handoff for the remote master.
 - `start-claude-worker.sh`: Linux/macOS launcher for standby or background
   mode.
@@ -174,4 +190,5 @@ do not expose it directly to the public Internet.
 - `a2a_bridge.py`: main entry point.
 - `test_claude_worker.py`: Claude session lifecycle tests.
 - `test_async_resume.py`: Codex client callback watcher tests.
+- `test_attached_worker.py`: attached executor and inbox tests.
 

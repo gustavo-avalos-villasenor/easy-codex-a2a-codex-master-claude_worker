@@ -35,6 +35,32 @@ TERMINAL_STATES = frozenset(
 )
 
 
+EXECUTORS = ("auto", "attached", "headless")
+ATTACHED_POLL_SECONDS = 0.5
+
+
+def resolve_executor(requested: str) -> tuple[str, str | None]:
+    """Choose who answers tasks: the launching conversation or a new session.
+
+    ``attached`` mounts the worker on the Claude Code conversation that started
+    the bridge, identified by ``CLAUDE_CODE_SESSION_ID``. That conversation
+    reads tasks and posts answers with ``a2a_inbox.py``. ``headless`` runs a
+    separate ``claude --print`` session. ``auto`` selects ``attached`` when the
+    bridge is launched from inside Claude Code and ``headless`` otherwise.
+    """
+
+    session_id = normalized_session_id(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    if requested == "auto":
+        requested = "attached" if session_id else "headless"
+    if requested == "attached" and not session_id:
+        raise RuntimeError(
+            "Attached mode needs CLAUDE_CODE_SESSION_ID. Start the worker from "
+            "the Claude Code conversation that will answer the tasks, or use "
+            "--executor headless."
+        )
+    return requested, session_id if requested == "attached" else None
+
+
 def claude_command() -> list[str]:
     """Find the Claude Code executable for the worker process."""
 
@@ -304,11 +330,13 @@ class TaskStore:
         context_id: str,
         worker: ClaudeWorker | None,
         demo: bool,
+        attached: bool = False,
     ) -> None:
         self.path = path.expanduser().resolve()
         self.context_id = context_id
         self.worker = worker
         self.demo = demo
+        self.attached = attached
         self.lock = threading.RLock()
         self.tasks: dict[str, TaskRecord] = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claude-worker")
@@ -335,6 +363,29 @@ class TaskStore:
                     updated_at TEXT NOT NULL
                 )
                 """
+            )
+            # Requests waiting for the attached Claude Code conversation.
+            # a2a_inbox.py reads pending rows and writes the reply columns.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS attached_requests (
+                    task_id TEXT PRIMARY KEY,
+                    prompt TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    reply_state TEXT,
+                    reply_text TEXT,
+                    replied_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                "UPDATE attached_requests SET reply_state = ?, reply_text = ?, "
+                "replied_at = ? WHERE reply_state IS NULL",
+                (
+                    "TASK_STATE_FAILED",
+                    "The bridge restarted before the attached conversation replied.",
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                ),
             )
 
     def _load_tasks(self) -> None:
@@ -427,6 +478,9 @@ class TaskStore:
             "TASK_STATE_WORKING",
             "Claude is processing this request.",
         )
+        if self.attached:
+            self._run_attached(record)
+            return
         try:
             if self.demo:
                 answer = "Demo Claude A2A: " + record.prompt
@@ -439,6 +493,35 @@ class TaskStore:
             self.update(record, "TASK_STATE_FAILED", f"Claude request failed: {exc}")
         else:
             self.update(record, "TASK_STATE_COMPLETED", answer)
+
+    def _run_attached(self, record: TaskRecord) -> None:
+        """Hand the task to the launching conversation and wait for its reply."""
+
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO attached_requests (task_id, prompt, created_at) "
+                "VALUES (?, ?, ?)",
+                (record.task_id, record.prompt, record.created_at),
+            )
+        self.update(
+            record,
+            "TASK_STATE_WORKING",
+            "Waiting for the attached Claude Code conversation to answer.",
+        )
+        while True:
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT reply_state, reply_text FROM attached_requests "
+                    "WHERE task_id = ? AND reply_state IS NOT NULL",
+                    (record.task_id,),
+                ).fetchone()
+            if row is not None:
+                state = row["reply_state"]
+                if state not in TERMINAL_STATES:
+                    state = "TASK_STATE_FAILED"
+                self.update(record, state, row["reply_text"] or "")
+                return
+            time.sleep(ATTACHED_POLL_SECONDS)
 
     def close(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
@@ -757,6 +840,14 @@ def main() -> None:
         "--repository-url",
         default=os.environ.get("A2A_REPOSITORY_URL") or None,
     )
+    parser.add_argument(
+        "--executor",
+        choices=EXECUTORS,
+        default=os.environ.get("A2A_EXECUTOR") or "auto",
+        help="attached: answer from the launching Claude Code conversation; "
+        "headless: run a separate claude --print session; auto: attached when "
+        "launched from Claude Code.",
+    )
     parser.add_argument("--demo", action="store_true")
     args = parser.parse_args()
 
@@ -781,8 +872,17 @@ def main() -> None:
         or f"http://{args.host}:{args.port}"
     ).rstrip("/")
 
-    worker = None
+    executor = "demo"
+    attached_session_id = None
     if not args.demo:
+        executor, attached_session_id = resolve_executor(args.executor)
+
+    worker = None
+    cli = ["(not used)"]
+    if executor == "attached":
+        print("Executor:            attached", flush=True)
+        print(f"Claude session:      {attached_session_id} (launching conversation)", flush=True)
+    elif not args.demo:
         cli = claude_command()
         worker = ClaudeWorker(
             cwd=cwd,
@@ -801,7 +901,13 @@ def main() -> None:
         )
 
     resolved_task_db = task_db.expanduser().resolve()
-    state = TaskStore(resolved_task_db, args.context_id, worker, args.demo)
+    state = TaskStore(
+        resolved_task_db,
+        args.context_id,
+        worker,
+        args.demo,
+        attached=executor == "attached",
+    )
     card = agent_card(
         base_url,
         args.context_id,
@@ -822,8 +928,9 @@ def main() -> None:
         task_db=resolved_task_db,
         pid_file=Path(os.environ.get("A2A_PID_FILE") or state_dir / "claude-worker.pid"),
         log_file=Path(os.environ.get("A2A_LOG_FILE") or state_dir / "claude-worker.log"),
-        session_id=worker.session_id if worker else None,
+        session_id=attached_session_id or (worker.session_id if worker else None),
         mode=os.environ.get("A2A_WORKER_MODE", "standby"),
+        executor=executor,
         claude_cli=" ".join(cli) if not args.demo else "demo",
         model=args.model,
         permission_mode=args.permission_mode,

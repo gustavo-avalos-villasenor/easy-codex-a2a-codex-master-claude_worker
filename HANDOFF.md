@@ -20,6 +20,12 @@ SQLite. Only one task runs Claude at a time. The Claude session is created by
 the first message and its UUID is stored in `state/claude-session.json`; later
 messages use `claude --resume` with that UUID.
 
+With the `attached` executor (the default when the launcher runs inside
+Claude Code) the bridge does not start Claude. It stores each task in the
+`attached_requests` table, and the launching conversation answers it with
+`a2a_inbox.py wait` and `a2a_inbox.py reply`, as described in `CLAUDE.md`.
+The session description above applies to the `headless` executor.
+
 Communication is request and response based. Claude does not open new
 conversations on its own or initiate messages to the master.
 
@@ -139,6 +145,7 @@ Available variables:
 - `A2A_AUTO_TAILSCALE`: automatic Tailscale IPv4 detection; defaults to `1`.
 - `A2A_STATE_DIR`: state, PID, log, and SQLite directory.
 - `A2A_REPOSITORY_URL`: URL printed and handed to the remote master.
+- `A2A_EXECUTOR`: `auto` (default), `attached`, or `headless`.
 
 Example for a machine reachable from another private network:
 
