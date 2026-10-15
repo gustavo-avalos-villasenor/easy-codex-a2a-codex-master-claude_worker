@@ -27,12 +27,21 @@ done
 cat <<MESSAGE
 Worker prepared for Claude Code session $SESSION.
 
-Run this command in a separate terminal on this machine. It stays in standby
-and prints the instructions for the Codex master:
+Run this command in a separate terminal on this machine, as the OS user that
+owns $ROOT. It stays in standby, prints the instructions for the Codex master,
+and saves them to $ROOT/state/connection-pack.txt:
 
     $command
 
-Then start the inbox waiter in this conversation as a background command:
+Keep this Claude Code conversation open while the worker is mounted.
+
+Then start the inbox waiter in this conversation as a background command. It
+stops whenever this conversation is closed, restarted, or resumed; start it
+again every time (CLAUDE.md, "Recover"):
 
     $(printf '%q' "$ROOT/.venv/bin/python") $(printf '%q' "$ROOT/a2a_inbox.py") wait
+
+Check it with:
+
+    $(printf '%q' "$ROOT/.venv/bin/python") $(printf '%q' "$ROOT/a2a_inbox.py") status
 MESSAGE

@@ -27,6 +27,15 @@ named by `--attached-session` answers it with `a2a_inbox.py wait` and
 the listener command for the user, as described in `CLAUDE.md`.
 The session description above applies to the `headless` executor.
 
+The waiter is a background command of that conversation, so it stops whenever
+the conversation is closed, restarted, or resumed, and the conversation must
+start it again. While it waits it refreshes `state/inbox-heartbeat.json`; the
+Agent Card reports it as `metadata.attachedWorker` (`listening`, `busy`, or
+`not listening`). When `wait` delivers a task it records `claimed_at`, and the
+task's status message changes from "Queued" to "Received". A task that no
+waiter receives within `A2A_ATTACHED_CLAIM_TIMEOUT` seconds (default 120)
+fails with a "not listening" reason and is never delivered later.
+
 Communication is request and response based. Claude does not open new
 conversations on its own or initiate messages to the master.
 
@@ -84,8 +93,8 @@ disable detection, set `A2A_AUTO_TAILSCALE=0`.
 
 Before entering standby, the launcher prints a complete pack with the
 repository, Agent Card, JSON-RPC endpoint, context ID, Claude session, state
-paths, and the copy-ready message for the remote Codex master. To print it
-again after the first message, when the session UUID exists:
+paths, and the copy-ready message for the remote Codex master. It also saves
+it to `state/connection-pack.txt`. To print the saved copy again:
 
 ~~~bash
 .venv/bin/python connection_pack.py
@@ -147,6 +156,8 @@ Available variables:
 - `A2A_STATE_DIR`: state, PID, log, and SQLite directory.
 - `A2A_REPOSITORY_URL`: URL printed and handed to the remote master.
 - `A2A_EXECUTOR`: `auto` (default), `attached`, or `headless`.
+- `A2A_ATTACHED_CLAIM_TIMEOUT`: seconds an attached task may wait to be
+  received before it fails; defaults to `120`, `0` disables it.
 
 Example for a machine reachable from another private network:
 

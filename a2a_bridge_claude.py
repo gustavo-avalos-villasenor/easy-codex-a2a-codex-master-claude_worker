@@ -22,7 +22,12 @@ import threading
 import time
 from uuid import UUID, uuid4
 
-from connection_pack import build_connection_pack, format_connection_pack
+from a2a_inbox import waiter_is_listening
+from connection_pack import (
+    CONNECTION_PACK_FILE,
+    build_connection_pack,
+    format_connection_pack,
+)
 
 
 TERMINAL_STATES = frozenset(
@@ -37,6 +42,29 @@ TERMINAL_STATES = frozenset(
 
 EXECUTORS = ("auto", "attached", "headless")
 ATTACHED_POLL_SECONDS = 0.5
+# An attached task that no `a2a_inbox.py wait` receives within this many
+# seconds fails, so the master is not left waiting on a conversation that is
+# not listening. 0 disables the limit.
+ATTACHED_CLAIM_SECONDS = float(os.environ.get("A2A_ATTACHED_CLAIM_TIMEOUT", "120"))
+
+ATTACHED_QUEUED_TEXT = (
+    "Queued: waiting for the worker Claude Code conversation to receive this task."
+)
+ATTACHED_RECEIVED_TEXT = (
+    "Received by the worker Claude Code conversation; Claude is working on it. "
+    "A person may be reviewing it, so this can take minutes. Keep waiting."
+)
+
+
+def not_listening_text(seconds: float) -> str:
+    return (
+        "The worker Claude Code conversation is not listening: no "
+        f"`a2a_inbox.py wait` received this task within {seconds:g} seconds, "
+        "so it was NOT executed. Tell the person who runs the worker to restart "
+        "the waiter in that conversation (see CLAUDE.md), check the Agent Card "
+        "metadata.attachedWorker until it is \"listening\", and then resend "
+        "the request."
+    )
 
 
 def resolve_executor(
@@ -382,16 +410,26 @@ class TaskStore:
                     created_at TEXT NOT NULL,
                     reply_state TEXT,
                     reply_text TEXT,
-                    replied_at TEXT
+                    replied_at TEXT,
+                    claimed_at TEXT
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(attached_requests)")
+            }
+            if "claimed_at" not in columns:
+                # Databases created before `wait` recorded when it received a task.
+                connection.execute("ALTER TABLE attached_requests ADD COLUMN claimed_at TEXT")
             connection.execute(
                 "UPDATE attached_requests SET reply_state = ?, reply_text = ?, "
                 "replied_at = ? WHERE reply_state IS NULL",
                 (
                     "TASK_STATE_FAILED",
-                    "The bridge restarted before the attached conversation replied.",
+                    "The listener restarted before the worker conversation replied; "
+                    "the task may be partly done. Ask the person who runs the "
+                    "worker before resending it.",
                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 ),
             )
@@ -511,25 +549,62 @@ class TaskStore:
                 "VALUES (?, ?, ?)",
                 (record.task_id, record.prompt, record.created_at),
             )
-        self.update(
-            record,
-            "TASK_STATE_WORKING",
-            "Waiting for the attached Claude Code conversation to answer.",
-        )
+        self.update(record, "TASK_STATE_WORKING", ATTACHED_QUEUED_TEXT)
+        queued_at = time.monotonic()
+        received = False
         while True:
             with self._connection() as connection:
                 row = connection.execute(
-                    "SELECT reply_state, reply_text FROM attached_requests "
-                    "WHERE task_id = ? AND reply_state IS NOT NULL",
+                    "SELECT reply_state, reply_text, claimed_at FROM attached_requests "
+                    "WHERE task_id = ?",
                     (record.task_id,),
                 ).fetchone()
-            if row is not None:
+            if row is not None and row["reply_state"] is not None:
                 state = row["reply_state"]
                 if state not in TERMINAL_STATES:
                     state = "TASK_STATE_FAILED"
                 self.update(record, state, row["reply_text"] or "")
                 return
+            if row is not None and row["claimed_at"] and not received:
+                received = True
+                self.update(record, "TASK_STATE_WORKING", ATTACHED_RECEIVED_TEXT)
+            if (
+                not received
+                and ATTACHED_CLAIM_SECONDS > 0
+                and time.monotonic() - queued_at >= ATTACHED_CLAIM_SECONDS
+            ):
+                text = not_listening_text(ATTACHED_CLAIM_SECONDS)
+                # Only expire it if no waiter received it in the meantime.
+                with self._connection() as connection:
+                    expired = connection.execute(
+                        "UPDATE attached_requests SET reply_state = ?, reply_text = ?, "
+                        "replied_at = ? WHERE task_id = ? AND reply_state IS NULL "
+                        "AND claimed_at IS NULL",
+                        (
+                            "TASK_STATE_FAILED",
+                            text,
+                            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            record.task_id,
+                        ),
+                    ).rowcount
+                if expired == 1:
+                    logging.warning("Attached task %s expired unreceived.", record.task_id)
+                    self.update(record, "TASK_STATE_FAILED", text)
+                    return
+                continue  # A waiter received it just now; report that next.
             time.sleep(ATTACHED_POLL_SECONDS)
+
+    def attached_status(self) -> str:
+        """listening, busy, or not listening; shown in the Agent Card."""
+
+        with self._connection() as connection:
+            busy = connection.execute(
+                "SELECT 1 FROM attached_requests WHERE reply_state IS NULL "
+                "AND claimed_at IS NOT NULL LIMIT 1"
+            ).fetchone()
+        if waiter_is_listening(self.path.parent):
+            return "listening"
+        return "busy" if busy else "not listening"
 
     def close(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
@@ -593,6 +668,16 @@ def message_prompt(message: dict[str, object]) -> str:
     )
 
 
+ATTACHED_STATUS_HELP = {
+    "listening": "The worker conversation is waiting for tasks; send one.",
+    "busy": "The worker conversation is working on a task; new tasks queue behind it.",
+    "not listening": (
+        "No waiter is running in the worker conversation. Tasks sent now fail "
+        "after the claim timeout. Ask the person who runs the worker to restart it."
+    ),
+}
+
+
 class BridgeHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -606,6 +691,15 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         super().__init__(address, A2ARequestHandler)
         self.state = state
         self.card = card
+
+    def current_card(self) -> dict[str, object]:
+        if not self.state.attached:
+            return self.card
+        status = self.state.attached_status()
+        metadata = dict(self.card.get("metadata", {}))  # type: ignore[arg-type]
+        metadata["attachedWorker"] = status
+        metadata["attachedWorkerHelp"] = ATTACHED_STATUS_HELP[status]
+        return {**self.card, "metadata": metadata}
 
 
 class A2ARequestHandler(BaseHTTPRequestHandler):
@@ -660,7 +754,7 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
                 status=404,
             )
             return
-        self._send_json(self.bridge.card)
+        self._send_json(self.bridge.current_card())
 
     def _read_request(self) -> dict[str, object] | None:
         try:
@@ -957,7 +1051,18 @@ def main() -> None:
         permission_mode=args.permission_mode,
         tools=args.tools,
     )
-    print(format_connection_pack(connection), end="", flush=True)
+    pack_text = format_connection_pack(connection)
+    pack_file = state_dir / CONNECTION_PACK_FILE
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        pack_file.write_text(pack_text, encoding="utf-8")
+    except OSError as exc:
+        print(f"Could not save the connection instructions to {pack_file}: {exc}", flush=True)
+    else:
+        connection["savedTo"] = str(pack_file)
+        pack_text = format_connection_pack(connection)
+        pack_file.write_text(pack_text, encoding="utf-8")
+    print(pack_text, end="", flush=True)
 
     logging.basicConfig(level=logging.INFO)
     try:

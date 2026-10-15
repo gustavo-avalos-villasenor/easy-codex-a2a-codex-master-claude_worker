@@ -1,11 +1,17 @@
 # Codex master + Claude worker
 
 > **Claude Code agent asked to mount this worker:** follow
-> [CLAUDE.md](CLAUDE.md). In short: run `./mount-worker.sh`, give the user the
-> command it prints, and start `.venv/bin/python a2a_inbox.py wait` as a
-> background command. The user runs the listener; it prints complete
-> instructions for the Codex master. Tasks from the master arrive in your
-> conversation and you answer them there.
+> [CLAUDE.md](CLAUDE.md). In short: clone into a permanent directory, run
+> `./mount-worker.sh`, give the user the command it prints, and start
+> `.venv/bin/python a2a_inbox.py wait` as a background command. The user runs
+> the listener; it prints complete instructions for the Codex master and saves
+> them to `state/connection-pack.txt`. Tasks from the master arrive in your
+> conversation and you answer them there. Your waiter dies whenever the
+> conversation restarts: start it again every time (CLAUDE.md, "Recover").
+>
+> **Codex master:** use the message the listener prints (or
+> `state/connection-pack.txt`); [REMOTE_AGENT_PROMPT.md](REMOTE_AGENT_PROMPT.md)
+> explains every task state.
 
 This repository exposes a persistent Claude Code session as an A2A 1.0
 worker. Codex acts as the master: it sends messages to the bridge over HTTP
@@ -19,14 +25,27 @@ Two executors answer the tasks:
   answers it with `a2a_inbox.py wait` / `a2a_inbox.py reply`. Selected by
   `--attached-session UUID` (the command `mount-worker.sh` prints) or when the
   launcher runs inside Claude Code. See [CLAUDE.md](CLAUDE.md).
+  The conversation must stay open with its waiter running. The Agent Card
+  reports `metadata.attachedWorker` (`listening`, `busy`, or `not listening`),
+  and a task that no waiter receives within `A2A_ATTACHED_CLAIM_TIMEOUT`
+  seconds (default 120) fails with a clear reason instead of staying in
+  `TASK_STATE_WORKING` forever.
 - `headless` (default from a plain terminal, or with `--headless`): the bridge
   runs a separate persistent Claude Code session with `claude --print`.
 
-The bridge keeps two durable pieces of state:
+The bridge keeps its state in `state/`:
 
 - `state/tasks.sqlite3`: A2A tasks and their states.
 - `state/claude-session.json`: the persistent Claude Code session UUID
   (headless executor only).
+- `state/connection-pack.txt`: the instructions for the master, written each
+  time the listener starts.
+- `state/attached-session.json` and `state/inbox-heartbeat.json`: the
+  conversation the worker is mounted on and its waiter's heartbeat (attached
+  executor only).
+
+Run the listener and the worker conversation as an OS user that can write
+`state/` (normally the owner of the repository directory).
 
 Each message is processed sequentially within the same Claude session. After
 the first message, later messages use Claude's `--resume` option, so the
@@ -69,8 +88,8 @@ Background mode prints the PID, the Agent Card, and the log path at
 Before entering standby, the launcher prints a complete connection pack with
 the repository, base URL, Agent Card, JSON-RPC endpoint, context ID, Claude
 session, state paths, configuration, and copy-ready instructions for the
-remote master. To print the pack again after the first message, when the
-Claude session UUID exists:
+remote master. It also saves the pack to `state/connection-pack.txt`, so you
+never need to scroll back. To print the saved pack again:
 
 ~~~bash
 .venv/bin/python connection_pack.py
@@ -166,6 +185,8 @@ The most useful variables are:
 - `A2A_WORKER_MODE`: mode label shown in the connection pack.
 - `A2A_EXECUTOR`: `auto` (default), `attached`, or `headless`.
 - `A2A_ATTACHED_SESSION`: Claude Code session UUID for the attached executor.
+- `A2A_ATTACHED_CLAIM_TIMEOUT`: seconds a task may wait for the attached
+  conversation to receive it before it fails (default `120`; `0` disables).
 - `A2A_REPOSITORY_URL` defaults to the `origin` remote, so the master's
   instructions include where to clone the client.
 
@@ -190,8 +211,10 @@ do not expose it directly to the public Internet.
 - `a2a_client.py`: standard client for the Codex master.
 - `mount-worker.sh`: run by the worker conversation; prints the listener
   command bound to that conversation.
-- `a2a_inbox.py`: wait for and answer tasks in attached mode.
-- `connection_pack.py`: prints the complete handoff for the remote master.
+- `a2a_inbox.py`: wait for (`wait`), answer (`reply`), and inspect
+  (`status`) tasks in attached mode.
+- `connection_pack.py`: prints the complete handoff for the remote master
+  (the copy the running listener saved, or `--rebuild` from the environment).
 - `start-claude-worker.sh`: Linux/macOS launcher for standby or background
   mode.
 - `stop-claude-worker.sh`: safe shutdown through the registered PID.
@@ -200,3 +223,12 @@ do not expose it directly to the public Internet.
 - `test_async_resume.py`: Codex client callback watcher tests.
 - `test_attached_worker.py`: attached executor and inbox tests.
 
+## Troubleshooting the attached worker
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| The master's task stays in `TASK_STATE_WORKING` with "Queued", then fails with "is not listening" | The worker conversation's waiter is not running (the conversation was closed, restarted, or resumed) | In the worker conversation: `a2a_inbox.py status`, answer any pending task, start `a2a_inbox.py wait` again. Then resend from the master. |
+| The Agent Card says `"attachedWorker": "not listening"` | Same as above | Same as above |
+| `a2a_inbox.py status` says the task database is missing | The listener is not running | Start it again with the command from `mount-worker.sh` |
+| The listener's output scrolled away | Long output in a terminal without scrollback | Open `state/connection-pack.txt`, or run `.venv/bin/python connection_pack.py` |
+| The listener cannot write `state/` | It runs as a different OS user than the owner of the repository | Run it as the owner, or `chown -R` the repository to that user |

@@ -10,6 +10,11 @@ import shlex
 from typing import Any
 
 
+# The listener saves the full instructions here, inside the state directory,
+# so nobody has to scroll back through the terminal to copy them.
+CONNECTION_PACK_FILE = "connection-pack.txt"
+
+
 def read_session_id(path: Path | None) -> str:
     if path is None:
         return "(created when the first message arrives)"
@@ -45,7 +50,10 @@ def build_connection_pack(
     model: str | None = None,
     permission_mode: str | None = None,
     tools: str | None = None,
+    claim_timeout: str | None = None,
 ) -> dict[str, Any]:
+    if claim_timeout is None:
+        claim_timeout = os.environ.get("A2A_ATTACHED_CLAIM_TIMEOUT") or "120"
     normalized_base = base_url.rstrip("/")
     resolved_session_file = Path(session_file).expanduser() if session_file else None
     resolved_repository = _configured(
@@ -83,6 +91,8 @@ def build_connection_pack(
         "pidFile": str(resolved_pid_file) if resolved_pid_file else "(not specified)",
         "logFile": str(Path(log_file).expanduser()) if log_file else "(not specified)",
         "stopCommand": stop_command,
+        "claimTimeout": claim_timeout,
+        "savedTo": None,
         "mode": mode,
         "executor": executor,
         "claudeCli": claude_cli or "claude (PATH/configured)",
@@ -117,6 +127,38 @@ def remote_agent_message(pack: dict[str, Any]) -> str:
         if attached
         else "a persistent headless Claude Code session"
     )
+    check_listening = (
+        '   In the card, metadata.attachedWorker must be "listening" (or "busy" '
+        'while it works on an earlier task). If it is "not listening", do not '
+        "send anything: tell your human that the worker conversation is not "
+        "listening and wait until the card says \"listening\".\n"
+        if attached
+        else ""
+    )
+    claim_timeout = str(pack.get("claimTimeout") or "120")
+    unreceived = (
+        "It stays queued until the worker conversation receives it."
+        if claim_timeout == "0"
+        else f"If nobody receives it within {claim_timeout} seconds it fails on "
+        "its own; do not resend before that."
+    )
+    states = (
+        "\nTask states (read result.task.status.state and the status message text):\n"
+        "- TASK_STATE_SUBMITTED: accepted and queued behind an earlier task.\n"
+        '- TASK_STATE_WORKING + "Queued: waiting for the worker Claude Code '
+        f'conversation to receive this task.": not delivered yet. {unreceived}\n'
+        '- TASK_STATE_WORKING + "Received by the worker Claude Code conversation": '
+        "Claude has it and is working. A person may be reviewing it, so it can "
+        "take many minutes. Keep waiting; never resend.\n"
+        "- TASK_STATE_COMPLETED: the status message text is Claude's answer.\n"
+        '- TASK_STATE_FAILED + "is not listening": the task was NOT executed. '
+        "Tell your human the worker conversation is not listening, wait until "
+        'the Agent Card says metadata.attachedWorker is "listening", then resend.\n'
+        "- TASK_STATE_FAILED with any other reason: the worker declined it or "
+        "could not finish. Read the reason before sending anything new.\n"
+        if attached
+        else ""
+    )
     send_message = (
         '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":'
         f'{{"role":"ROLE_USER","contextId":"{context_id}","parts":[{{"text":"YOUR MESSAGE"}}]}},'
@@ -135,6 +177,7 @@ def remote_agent_message(pack: dict[str, Any]) -> str:
         f"{get_client}"
         "2. Check that the worker is reachable:\n"
         f'   curl -fsS "{pack["agentCardUrl"]}"\n'
+        f"{check_listening}"
         "3. Send requests with a2a_client.py from that folder. It reads the "
         "endpoint and contextId from the Agent Card; do not build JSON-RPC by "
         "hand while the client is available.\n"
@@ -163,13 +206,20 @@ def remote_agent_message(pack: dict[str, Any]) -> str:
         "be doing it.\n"
         "- A task can end in TASK_STATE_FAILED with a reason, for example when "
         "the worker declines it. Read the reason before sending a new request."
+        f"{states}"
     )
 
 
 def format_connection_pack(pack: dict[str, Any]) -> str:
+    saved = (
+        [f"Saved to:        {pack['savedTo']} (open it instead of scrolling back)"]
+        if pack.get("savedTo")
+        else []
+    )
     lines = [
         "",
         "================ A2A connection instructions ================",
+        *saved,
         f"Worker:          {pack['worker']} ({pack['role']})",
         f"Protocol:        {pack['transport']}",
         f"Repository:      {pack['repositoryUrl']}",
@@ -203,13 +253,17 @@ def format_connection_pack(pack: dict[str, Any]) -> str:
         *(
             [
                 f"Attached executor: Claude Code session {pack['sessionId']} answers",
-                "each task. That conversation must keep `a2a_inbox.py wait` running.",
+                "each task. That conversation must stay open and keep",
+                "`a2a_inbox.py wait` running. If it is closed or restarted, its waiter",
+                "stops: tasks then fail after the claim timeout instead of hanging.",
+                f"Claim timeout:   {pack.get('claimTimeout')} seconds (A2A_ATTACHED_CLAIM_TIMEOUT; 0 = none)",
             ]
             if pack.get("executor") == "attached"
             else []
         ),
         "In standby mode, press Ctrl+C in this terminal to stop it.",
         f"In background mode, use {pack['stopCommand']} to stop it.",
+        *saved,
         "",
         "==============================================================",
         "",
@@ -217,9 +271,19 @@ def format_connection_pack(pack: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _working_directory() -> Path:
+    return Path(os.environ.get("A2A_CLAUDE_CWD") or Path.cwd()).expanduser().resolve()
+
+
+def _state_dir() -> Path:
+    return Path(
+        os.environ.get("A2A_STATE_DIR") or (_working_directory() / "state")
+    ).expanduser()
+
+
 def _from_environment() -> dict[str, Any]:
-    cwd = Path(os.environ.get("A2A_CLAUDE_CWD") or Path.cwd()).expanduser().resolve()
-    state_dir = Path(os.environ.get("A2A_STATE_DIR") or (cwd / "state")).expanduser()
+    cwd = _working_directory()
+    state_dir = _state_dir()
     port = int(os.environ.get("A2A_PORT", "8766"))
     host = os.environ.get("A2A_HOST", "127.0.0.1")
     base_url = os.environ.get("A2A_BASE_URL") or f"http://{host}:{port}"
@@ -250,7 +314,18 @@ def main() -> None:
     parser.add_argument("--context-id")
     parser.add_argument("--repository-url")
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help=f"Build the pack from the environment even if the listener saved {CONNECTION_PACK_FILE}.",
+    )
     args = parser.parse_args()
+    overrides = args.base_url or args.context_id or args.repository_url
+    saved = _state_dir() / CONNECTION_PACK_FILE
+    if not (args.rebuild or args.as_json or overrides) and saved.is_file():
+        # The running listener wrote this with its real settings.
+        print(saved.read_text(encoding="utf-8"), end="")
+        return
     pack = _from_environment()
     if args.base_url:
         pack["baseUrl"] = args.base_url.rstrip("/")
